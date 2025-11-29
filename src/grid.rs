@@ -1,10 +1,20 @@
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
-use std::io::Cursor;
+use base64::{Engine as _, engine::general_purpose};
+use rayon::prelude::*;
 
 #[derive(Debug)]
 pub enum GridError {
     ImageDecodeError(image::ImageError),
     EmptyInput,
+    DownloadError(reqwest::Error),
+    Base64DecodeError(base64::DecodeError),
+    Utf8Error(std::string::FromUtf8Error),
+}
+
+#[derive(Debug)]
+pub struct DownloadResult {
+    pub url: String,
+    pub data: Vec<u8>,
 }
 
 impl std::fmt::Display for GridError {
@@ -12,6 +22,9 @@ impl std::fmt::Display for GridError {
         match self {
             GridError::ImageDecodeError(e) => write!(f, "Failed to decode image: {}", e),
             GridError::EmptyInput => write!(f, "No images provided"),
+            GridError::DownloadError(e) => write!(f, "Failed to download image: {}", e),
+            GridError::Base64DecodeError(e) => write!(f, "Failed to decode base64: {}", e),
+            GridError::Utf8Error(e) => write!(f, "Invalid UTF-8 in decoded data: {}", e),
         }
     }
 }
@@ -24,15 +37,35 @@ impl From<image::ImageError> for GridError {
     }
 }
 
+impl From<reqwest::Error> for GridError {
+    fn from(err: reqwest::Error) -> Self {
+        GridError::DownloadError(err)
+    }
+}
+
+impl From<base64::DecodeError> for GridError {
+    fn from(err: base64::DecodeError) -> Self {
+        GridError::Base64DecodeError(err)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for GridError {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        GridError::Utf8Error(err)
+    }
+}
+
 pub fn create_image_grid(image_bytes: &[&[u8]]) -> Result<RgbaImage, GridError> {
     if image_bytes.is_empty() {
         return Err(GridError::EmptyInput);
     }
 
-    let images: Result<Vec<DynamicImage>, GridError> = image_bytes
-        .iter()
+    let images: Result<Vec<RgbaImage>, GridError> = image_bytes
+        .par_iter()
         .map(|bytes| {
-            image::load_from_memory(bytes).map_err(GridError::from)
+            image::load_from_memory(bytes)
+                .map(|img| img.to_rgba8())
+                .map_err(GridError::from)
         })
         .collect();
 
@@ -59,9 +92,7 @@ pub fn create_image_grid(image_bytes: &[&[u8]]) -> Result<RgbaImage, GridError> 
         let x_offset = col * max_width;
         let y_offset = row * max_height;
 
-        let rgba_img = img.to_rgba8();
-
-        image::imageops::overlay(&mut grid_image, &rgba_img, x_offset as i64, y_offset as i64);
+        image::imageops::overlay(&mut grid_image, img, x_offset as i64, y_offset as i64);
     }
 
     Ok(grid_image)
@@ -77,6 +108,72 @@ fn calculate_grid_dimensions(count: usize) -> (u32, u32) {
             let rows = (n as f32 / cols as f32).ceil() as u32;
             (cols, rows)
         }
+    }
+}
+
+pub struct ImageService {
+    client: reqwest::Client,
+}
+
+impl ImageService {
+    pub fn new() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn download_images(&self, urls: &[String]) -> Result<Vec<Vec<u8>>, GridError> {
+        if urls.is_empty() {
+            return Err(GridError::EmptyInput);
+        }
+
+        let download_tasks: Vec<_> = urls
+            .iter()
+            .map(|url| {
+                let client = self.client.clone();
+                let url = url.clone();
+                async move {
+                    let response = client.get(&url).send().await?;
+                    let bytes = response.bytes().await?;
+                    Ok::<Vec<u8>, reqwest::Error>(bytes.to_vec())
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(download_tasks).await;
+
+        let images: Result<Vec<Vec<u8>>, GridError> = results
+            .into_iter()
+            .map(|r| r.map_err(GridError::from))
+            .collect();
+
+        images
+    }
+
+    pub async fn process_base64_urls(&self, base64_urls: &str) -> Result<RgbaImage, GridError> {
+        let decoded_bytes = general_purpose::STANDARD
+            .decode(base64_urls)
+            .or_else(|_| general_purpose::URL_SAFE_NO_PAD.decode(base64_urls))
+            .or_else(|_| general_purpose::URL_SAFE.decode(base64_urls))?;
+        let decoded_str = String::from_utf8(decoded_bytes)?;
+
+        let urls: Vec<String> = decoded_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let downloaded = self.download_images(&urls).await?;
+
+        let refs: Vec<&[u8]> = downloaded.iter().map(|v| v.as_slice()).collect();
+
+        create_image_grid(&refs)
+    }
+}
+
+impl Default for ImageService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
