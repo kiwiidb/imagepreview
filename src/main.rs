@@ -24,7 +24,12 @@ async fn preview_handler(
     match service.process_base64_urls(base64_urls).await {
         Ok(image) => {
             let mut buf = Vec::new();
-            if let Err(e) = image.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png) {
+            let mut cursor = std::io::Cursor::new(&mut buf);
+
+            // Convert to DynamicImage for JPEG encoding
+            let dynamic_image = image::DynamicImage::ImageRgba8(image);
+
+            if let Err(e) = dynamic_image.write_to(&mut cursor, image::ImageFormat::Jpeg) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain")],
@@ -34,7 +39,7 @@ async fn preview_handler(
 
             (
                 StatusCode::OK,
-                [(header::CONTENT_TYPE, "image/png")],
+                [(header::CONTENT_TYPE, "image/jpeg")],
                 buf,
             )
         }
@@ -80,7 +85,7 @@ async fn main() {
     println!("Example:");
     println!("  URLS='https://example.com/1.jpg,https://example.com/2.png'");
     println!("  BASE64=$(echo -n \"$URLS\" | base64)");
-    println!("  curl http://localhost:3000/preview/$BASE64 > grid.png");
+    println!("  curl http://localhost:3000/preview/$BASE64 > grid.jpg");
 
     axum::serve(listener, app)
         .await
