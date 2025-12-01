@@ -9,6 +9,8 @@ COPY Cargo.toml Cargo.lock* ./
 # Copy source code
 COPY src ./src
 
+RUN apt-get update && \
+    apt-get install -y pkg-config libssl-dev
 # Build for release
 RUN cargo build --release
 
