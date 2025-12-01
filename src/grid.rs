@@ -1,6 +1,5 @@
 use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage};
 use base64::{Engine as _, engine::general_purpose};
-use rayon::prelude::*;
 
 #[derive(Debug)]
 pub enum GridError {
@@ -61,7 +60,7 @@ pub fn create_image_grid(image_bytes: &[&[u8]]) -> Result<RgbaImage, GridError> 
     }
 
     let images: Result<Vec<RgbaImage>, GridError> = image_bytes
-        .par_iter()
+        .iter()
         .map(|bytes| {
             image::load_from_memory(bytes)
                 .map(|img| img.to_rgba8())
@@ -165,9 +164,13 @@ impl ImageService {
 
         let downloaded = self.download_images(&urls).await?;
 
-        let refs: Vec<&[u8]> = downloaded.iter().map(|v| v.as_slice()).collect();
-
-        create_image_grid(&refs)
+        // Offload blocking CPU work to a dedicated thread pool
+        tokio::task::spawn_blocking(move || {
+            let refs: Vec<&[u8]> = downloaded.iter().map(|v| v.as_slice()).collect();
+            create_image_grid(&refs)
+        })
+        .await
+        .map_err(|_| GridError::EmptyInput)?
     }
 }
 

@@ -937,7 +937,6 @@ dependencies = [
  "base64",
  "futures",
  "image",
- "rayon",
  "reqwest",
  "tokio",
  "tower-http",
